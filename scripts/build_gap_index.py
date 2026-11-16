@@ -1,16 +1,18 @@
 """Publish the gap wheels index: a PEP 503 simple index and a page explaining it, from data/gap-wheels.json.
 
-    python3 scripts/build_gap_index.py data/gap-wheels.json _site
+    python3 scripts/build_gap_index.py data/gap-wheels.json _site [--download-counts FILE]
 
 Writes <site>/wheels/simple/index.html (every project), <site>/wheels/simple/<project>/index.html (its wheels, each
 linking to the file on the `gap-wheels` release with its sha256, which pip checks) and <site>/wheels/index.html (what
 the index is, how to use it, why the wheels can be trusted, and how a project opts out). gap_wheels.py publish writes
-the JSON; it is also published as data/gap-wheels.json, the transparency record. Runs at publish time; nothing is
-committed. Plain HTML, no JavaScript, under the site's usual CSP.
+the JSON; it is also published as data/gap-wheels.json, the transparency record. Optional release counts are read
+from a JSON file; missing or malformed counts are omitted. Runs at publish time; nothing is committed. Plain HTML,
+no JavaScript, under the site's usual CSP.
 """
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import re
@@ -85,30 +87,38 @@ def project_links(wheels: list[dict]) -> list[str]:
     return links
 
 
-def human_page(by_project: dict[str, list[dict]]) -> str:
+def human_page(by_project: dict[str, list[dict]], downloads: dict[str, int] | None = None) -> str:
     e = html.escape
     rows = []
     for project, wheels in by_project.items():
         for w in wheels:
             builds = [u for u in w.get("builds") or [] if isinstance(u, str) and u.startswith("https://github.com/")]
             links = ", ".join(f'<a href="{e(u)}">build {n}</a>' for n, u in enumerate(builds, 1))
+            download_cell = f"<td>{downloads.get(w['wheel'], 0):,}</td>" if downloads is not None else ""
             rows.append(
                 f'          <tr><td><a href="../p/{e(project)}/">{e(w["name"])}</a></td>'
                 f"<td>{e(str(w.get('version', '')))}</td><td>{e(str(w.get('target', '')))}</td>"
                 f"<td>{e(str(w.get('verified') or ''))}</td><td>{links}</td>"
-                f'<td><a href="{e(RELEASE_URL + w["wheel"])}">wheel</a></td></tr>'
+                f'{download_cell}<td><a href="{e(RELEASE_URL + w["wheel"])}">wheel</a></td></tr>'
             )
     count = sum(len(v) for v in by_project.values())
+    download_heading = "<th>Downloads</th>" if downloads is not None else ""
     table = (
         '        <div class="matrix-scroll"><table class="matrix">\n'
         "          <thead><tr><th>Package</th><th>Version</th><th>Target</th><th>Verified</th><th>Builds</th>"
-        "<th>File</th></tr></thead>\n"
+        f"{download_heading}<th>File</th></tr></thead>\n"
         "          <tbody>\n" + "\n".join(rows) + "\n          </tbody>\n"
         "        </table></div>\n"
         if rows
         else '        <p class="note">No wheels published yet.</p>\n'
     )
     summary = "Windows on ARM wheels that PyPI doesn't have yet, for Python 3.14. Each one is built twice and only goes up if both builds match."
+    download_total = (
+        sum(downloads.get(w["wheel"], 0) for wheels in by_project.values() for w in wheels)
+        if downloads is not None
+        else 0
+    )
+    download_summary = f", downloaded {download_total:,} times" if downloads is not None else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -125,7 +135,7 @@ def human_page(by_project: dict[str, list[dict]]) -> str:
   <header class="wrap">
     <p class="eyebrow"><a href="../">wheelgap tracker</a></p>
     <h1>Gap wheels</h1>
-    <p class="lede">Some popular Python packages don't have a wheel on PyPI for Windows on ARM yet, mostly on Python 3.14. When that happens pip tries to build them from source, which needs Rust or a C compiler and often fails. These are the missing wheels. {count} so far.</p>
+    <p class="lede">Some popular Python packages don't have a wheel on PyPI for Windows on ARM yet, mostly on Python 3.14. When that happens pip tries to build them from source, which needs Rust or a C compiler and often fails. These are the missing wheels. {count} wheels so far{download_summary}.</p>
   </header>
   <main class="wrap">
     <section>
@@ -161,7 +171,27 @@ def human_page(by_project: dict[str, list[dict]]) -> str:
 """
 
 
-def build(index_path: Path, site: Path) -> int:
+def read_downloads(path: Path | None) -> dict[str, int] | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        downloads = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(downloads, dict) or not downloads:
+        return None
+    if any(
+        not isinstance(name, str)
+        or not name.endswith(".whl")
+        or type(count) is not int
+        or count < 0
+        for name, count in downloads.items()
+    ):
+        return None
+    return downloads
+
+
+def build(index_path: Path, site: Path, downloads_path: Path | None = None) -> int:
     data = json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {"wheels": []}
     wheels = data.get("wheels") if isinstance(data, dict) and isinstance(data.get("wheels"), list) else []
     by_project = projects(wheels)
@@ -174,11 +204,17 @@ def build(index_path: Path, site: Path) -> int:
         (simple / project / "index.html").write_text(
             simple_page(f"Links for {project}", project_links(files)), encoding="utf-8"
         )
-    (site / "wheels" / "index.html").write_text(human_page(by_project), encoding="utf-8")
+    downloads = read_downloads(downloads_path)
+    (site / "wheels" / "index.html").write_text(human_page(by_project, downloads), encoding="utf-8")
     build_campaigns.add_to_sitemap(site, [f"{BASE_URL}wheels/"])
     print(f"gap wheels: {sum(len(v) for v in by_project.values())} wheels of {len(by_project)} projects")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(build(Path(sys.argv[1]), Path(sys.argv[2])))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("index", type=Path)
+    parser.add_argument("site", type=Path)
+    parser.add_argument("--download-counts", type=Path)
+    args = parser.parse_args()
+    sys.exit(build(args.index, args.site, args.download_counts))

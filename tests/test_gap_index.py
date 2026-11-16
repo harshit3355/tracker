@@ -17,10 +17,16 @@ def wheel(name="tiktoken", file="tiktoken-0.14.0-cp314-cp314-win_arm64.whl", **o
 
 
 class Index(unittest.TestCase):
-    def build(self, wheels):
+    def build(self, wheels, downloads_json=None):
         tmp = Path(tempfile.mkdtemp())
         (tmp / "gap-wheels.json").write_text(json.dumps({"schema": 1, "wheels": wheels}))
-        build_gap_index.build(tmp / "gap-wheels.json", tmp / "site")
+        downloads_path = None
+        if downloads_json is not None:
+            downloads_path = tmp / "downloads.json"
+            downloads_path.write_text(
+                downloads_json if isinstance(downloads_json, str) else json.dumps(downloads_json)
+            )
+        build_gap_index.build(tmp / "gap-wheels.json", tmp / "site", downloads_path)
         return tmp / "site"
 
     def test_pep_503_pages_with_hashes(self):
@@ -50,6 +56,29 @@ class Index(unittest.TestCase):
         self.assertNotIn("unsafe-best-match", page)
         project = (site / "wheels/simple/tiktoken/index.html").read_text()
         self.assertIn('data-requires-python="&quot;&gt;&lt;x"', project)
+
+    def test_download_counts_are_shown_per_wheel_and_in_the_summary(self):
+        first = "tiktoken-0.14.0-cp314-cp314-win_arm64.whl"
+        second = "zope_interface-8.7-cp314-cp314-win_arm64.whl"
+        site = self.build(
+            [wheel(), wheel(name="Zope.Interface", file=second)],
+            {first: 1200, second: 0},
+        )
+        page = (site / "wheels/index.html").read_text()
+        self.assertIn("<th>Downloads</th>", page)
+        self.assertIn("<td>1,200</td>", page)
+        self.assertIn("<td>0</td>", page)
+        self.assertIn("2 wheels so far, downloaded 1,200 times.", page)
+
+    def test_download_column_is_omitted_without_counts(self):
+        page = (self.build([wheel()]) / "wheels/index.html").read_text()
+        self.assertNotIn("<th>Downloads</th>", page)
+        self.assertNotIn("downloads so far", page)
+
+    def test_malformed_download_counts_are_ignored(self):
+        page = (self.build([wheel()], "{not json") / "wheels/index.html").read_text()
+        self.assertNotIn("<th>Downloads</th>", page)
+        self.assertNotIn("downloads so far", page)
 
     def test_no_file_yet(self):
         tmp = Path(tempfile.mkdtemp())

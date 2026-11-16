@@ -232,6 +232,7 @@ jobs:
       group: pages
       cancel-in-progress: false
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -244,6 +245,8 @@ jobs:
           persist-credentials: false
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Assemble the site
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p _site/data
           cp -r site/. _site/
@@ -255,7 +258,16 @@ jobs:
           python3 scripts/build_pages.py data/coverage.json _site
           python3 scripts/build_campaigns.py data/coverage.json data/history.json data/changes.json campaigns.toml _site
           # Extra page: the gap wheels index. A malformed gap-wheels.json warns rather than stopping the deploy.
-          if ! python3 scripts/build_gap_index.py data/gap-wheels.json _site; then
+          downloads="$RUNNER_TEMP/gap-wheel-downloads.json"
+          download_args=()
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/gap-wheels" \
+            --jq '[.assets[] | select(.name | endswith(".whl")) | {key: .name, value: .download_count}] | from_entries' \
+            > "$downloads"; then
+            download_args=(--download-counts "$downloads")
+          else
+            echo "::warning::Could not fetch gap-wheel release downloads; hiding download counts"
+          fi
+          if ! python3 scripts/build_gap_index.py data/gap-wheels.json _site "${download_args[@]}"; then
             echo "::warning::build_gap_index failed, so the gap wheels index isn't published this time"
           fi
           # Extra page: a malformed drops.json warns and leaves it out rather than stopping the deploy.
